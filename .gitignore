@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+payroll.db
+employees.csv
+clock_events.csv
+late_events.csv
