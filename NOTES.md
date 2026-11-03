@@ -1,54 +1,41 @@
-# Brayd Payroll Calculator — Round 1 Notes
+# Brayd Payroll Calculator — Implementation Notes
 
-## Run it
-Use Python 3.10+ from this folder. Put `employees.csv` and `clock_events.csv`
-beside `payroll.py`, then run:
+## 1. Assumptions and edge cases
 
-```bash
-python payroll.py load
-python payroll.py run 2026-10
-python payroll.py payslip E01 2026-10
-python payroll.py lock 2026-10
-python payroll.py late late_events.csv
-```
+- ISO-8601 timestamps with an explicit timezone offset are converted to IST (UTC+05:30). Timestamps without an offset are assumed to be IST.
+- Attendance events are grouped by their IST calendar date. For each non-Sunday, the earliest IN and latest OUT are selected.
+- If either IN or OUT is missing, the day is treated as absent and marked with `MISSING_PUNCH`. Days with no events are also treated as absent.
+- A valid pair of punches with at least 240 worked minutes counts as a full day. Positive work below 240 minutes counts as a half-day. A negative duration is clamped to zero.
+- Sundays on or after the joining date are paid weekly offs, and Sunday clock events are ignored. Dates before joining are excluded.
+- October daily pay is calculated using 31 days. Other months use their actual calendar-day count.
+- An employee is late when the earliest IN is strictly more than 10 minutes after shift start. A half-day salary deduction is applied for every complete group of three late days.
+- Overtime is calculated for minutes beyond 540 worked minutes per day and paid at 1.5 times the hourly rate.
+- I use `Decimal` for monetary calculations, round line items to paise, and round final net pay to the nearest rupee using half-up rounding.
 
-Run tests with `python -m pip install pytest` and `python -m pytest -q`.
+## 2. SQL report interpretation
 
-## Design
-- SQLite is the only database. `employees`, `clock_events`, `payslips`,
-  `payslip_items`, and `month_locks` hold the input and payroll results.
-- `event_id` is the primary key, so re-uploading an event cannot add a second copy.
-- ISO timestamps are parsed with their timezone offset and converted to IST before
-  extracting the attendance date or comparing shift times. A timestamp without an
-  offset is treated as IST.
-- For each non-Sunday day after joining, the script selects the earliest IN and
-  latest OUT. A missing side creates a `MISSING_PUNCH` flag. Work of 240 minutes
-  or more is a full day; positive work below that is a half day.
-- Sundays on or after joining are paid weekly offs. Overtime is the minutes above
-  540, and late deductions are applied in blocks of three qualifying late days.
-- Decimal arithmetic is used for money. Line items are rounded to paisa; net pay
-  is rounded to the nearest rupee using half-up rounding.
-- Payslips have a unique `(employee_id, period)` key and are upserted, so rerunning
-  payroll updates the same record rather than inserting duplicates. Locking adds a
-  month-lock record; later `run` commands refuse to alter that month.
-- Late uploads are deduplicated by `event_id`. The script recomputes the affected
-  employee's October result using all accepted events, compares it with the locked
-  net pay, and upserts one November arrears line. It does not update October's
-  locked payslip.
+The second SQL report returned these employees with net pay below 75% of gross:
 
-## SQL report interpretation
-Run the two queries in `report.sql` using SQLite, for example:
-`sqlite3 payroll.db < report.sql`.
+- **E04 — Fatima Begum:** Gross ₹18,600; net ₹2,400; 12.90% of gross.
+- **E03 — Arjun Reddy:** Gross ₹27,900; net ₹17,123; 61.37% of gross.
 
-The second query's returned employees must be checked against their attendance
-flags and day counts. A result can be correct when the employee joined part-way
-through October, had absences, missing punches, or accumulated late deductions.
-It may indicate a bug if the underlying valid punches were missed, a timezone/day
-boundary was handled incorrectly, or an eligible Sunday/workday was not counted.
-Write the employee-specific explanation after running the supplied assessment data;
-the CSVs are needed to identify the actual returned employees, so do not guess.
+Both employees meet the report condition. The SQL result identifies the difference but does not by itself explain the reason. I would review their payslips, paid days, attendance flags, and deductions before identifying the cause. I have not assumed a reason without verifying the attendance records.
 
-## Before the live round
-Be ready to explain `parse_device_time`, `calculate_employee`, the unique keys,
-the lock check, and the late-arrears upsert. Practise changing the shift grace
-period or full-day threshold and rerunning the tests.
+## 3. Duplicate prevention and payroll locking
+
+- I use `event_id` as the primary key for clock events to prevent duplicate attendance records.
+- A unique constraint on `(employee_id, period)` prevents duplicate payslips for the same employee and month.
+- I use an upsert so that rerunning an unlocked payroll updates the existing payslip instead of creating another one.
+- Once a month is locked, the payroll run command refuses to recalculate that month.
+- Late attendance is processed after the October lock. The difference between the corrected October calculation and the locked October result is stored as a November arrears line.
+- The arrears entry is upserted, so uploading the same late events again does not duplicate the adjustment. The original October payslip remains unchanged.
+
+## 4. Bug encountered and validation
+
+During validation, I found that a command was executing an old unconditional main block and printing October payroll even when I requested a November payslip. I corrected the CLI flow so that only the requested subcommand runs, then tested the payslip command again.
+
+I also checked the attendance calculation for a negative same-date interval and made it follow the under-240-minute rule by clamping the duration to zero.
+
+## 5. What I would improve with one more day
+
+I would add more integration tests for employees joining during a month, missing punches, multiple IN/OUT events, and timestamps close to midnight. I would also improve validation messages for malformed CSV records and add a reconciliation report to make attendance corrections and arrears easier to audit.
